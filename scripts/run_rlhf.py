@@ -117,7 +117,7 @@ def run_rlhf_training(config: AssignmentConfig):
     
     # Generate baseline samples for comparison
     logger.info("Generating baseline samples...")
-    baseline_responses, _ = trainer.policy.generate(
+    baseline_responses,_,_,_, _ = trainer.policy.generate(
         prompts=eval_prompts[:5],  # First 5 prompts for comparison
         max_length=config.verl.rollout_max_length,
         temperature=config.verl.rollout_temperature,
@@ -150,8 +150,6 @@ def run_rlhf_training(config: AssignmentConfig):
         }
         
         num_batches = len(train_prompts) // config.verl.rollout_batch_size
-        if len(train_prompts) % config.verl.rollout_batch_size != 0:
-            num_batches += 1
         
         # Create progress bar for epoch
         epoch_progress = tqdm(range(num_batches), desc=f"Epoch {epoch + 1}")
@@ -203,6 +201,32 @@ def run_rlhf_training(config: AssignmentConfig):
                 logger.info(f"  Value Loss: {step_metrics.value_loss:.4f}")
                 logger.info(f"  Reward Mean: {step_metrics.reward_mean:.4f}")
                 logger.info(f"  KL Divergence: {step_metrics.kl_divergence:.4f}")
+            
+            if (batch_idx + 1) % config.system.eval_steps == 0:
+                logger.info(f"Evaluating model after batch {batch_idx + 1}...")
+                eval_metrics = evaluate_policy(
+                    trainer=trainer,
+                    eval_prompts=eval_prompts,
+                    num_samples=3
+                )
+                
+                logger.info("Evaluation results:")
+                for key, value in eval_metrics.items():
+                    logger.info(f"  {key}: {value:.4f}")
+
+                current_reward = eval_metrics['mean_reward']
+                if current_reward > best_reward:
+                    best_reward = current_reward
+                    
+                    # Save best model
+                    best_model_path = os.path.join(
+                        config.system.rlhf_model_dir,
+                        "best_rlhf_model"
+                    )
+                    trainer.policy.model.save_pretrained(best_model_path)
+                    trainer.tokenizer.save_pretrained(best_model_path)
+                    
+                    logger.info(f"Saved new best model with reward: {current_reward:.4f}")
         
         # Average epoch metrics
         for key in epoch_metrics:
@@ -210,44 +234,28 @@ def run_rlhf_training(config: AssignmentConfig):
                 epoch_metrics[key] /= num_batches
         
         # Evaluate model after epoch
-        if (epoch + 1) % config.system.eval_steps == 0 or epoch == config.training.ppo_num_epochs - 1:
-            logger.info(f"Evaluating model after epoch {epoch + 1}...")
-            eval_metrics = evaluate_policy(
-                trainer=trainer,
-                eval_prompts=eval_prompts,
-                num_samples=3
-            )
+        logger.info(f"Evaluating model after epoch {epoch + 1}...")
+        eval_metrics = evaluate_policy(
+            trainer=trainer,
+            eval_prompts=eval_prompts,
+            num_samples=3
+        )
+        
+        # Add evaluation metrics to epoch metrics
+        for key, value in eval_metrics.items():
+            epoch_metrics[f'eval_{key}'] = value
+        
+        logger.info("Evaluation results:")
+        for key, value in eval_metrics.items():
+            logger.info(f"  {key}: {value:.4f}")
             
-            # Add evaluation metrics to epoch metrics
-            for key, value in eval_metrics.items():
-                epoch_metrics[f'eval_{key}'] = value
-            
-            logger.info("Evaluation results:")
-            for key, value in eval_metrics.items():
-                logger.info(f"  {key}: {value:.4f}")
-            
-            # Check if this is the best model so far
-            current_reward = eval_metrics['mean_reward']
-            if current_reward > best_reward:
-                best_reward = current_reward
-                
-                # Save best model
-                best_model_path = os.path.join(
-                    config.system.rlhf_model_dir,
-                    "best_rlhf_model"
-                )
-                trainer.policy.model.save_pretrained(best_model_path)
-                trainer.tokenizer.save_pretrained(best_model_path)
-                
-                logger.info(f"Saved new best model with reward: {current_reward:.4f}")
         
         # Save checkpoint
-        if (epoch + 1) % config.system.save_steps == 0:
-            checkpoint_path = os.path.join(
-                config.system.rlhf_model_dir,
-                f"rlhf_checkpoint_epoch_{epoch + 1}.pt"
-            )
-            trainer.save_checkpoint(checkpoint_path, epoch, epoch_metrics)
+        checkpoint_path = os.path.join(
+            config.system.rlhf_model_dir,
+            f"rlhf_checkpoint_epoch_{epoch + 1}.pt"
+        )
+        trainer.save_checkpoint(checkpoint_path, epoch, epoch_metrics)
         
         # Update metrics tracker with epoch metrics
         metrics_tracker.update(epoch_metrics, step=epoch)
@@ -274,7 +282,7 @@ def run_rlhf_training(config: AssignmentConfig):
     
     # Generate final samples for comparison
     logger.info("Generating final samples for comparison...")
-    final_responses, _ = trainer.policy.generate(
+    final_responses,_,_,_,_ = trainer.policy.generate(
         prompts=eval_prompts[:5],
         max_length=config.verl.rollout_max_length,
         temperature=config.verl.rollout_temperature,
